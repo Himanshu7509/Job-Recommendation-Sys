@@ -1,6 +1,6 @@
 # =============================
 # app/services/recommender.py
-# Production-safe + optimized
+# MongoDB-schema compatible
 # =============================
 
 import os
@@ -13,23 +13,14 @@ from sentence_transformers import SentenceTransformer
 from app.services.resume_parser import parse_resume
 from app.services.index_manager import get_index, get_jobs_df
 
-# -----------------------------
-# HuggingFace cache config
-# -----------------------------
 CACHE_DIR = "/app/hf_cache"
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# -----------------------------
-# Model config
-# -----------------------------
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 TOP_K = 20
 
-# -----------------------------
-# Load model once (singleton)
-# -----------------------------
 _model = None
 
 
@@ -37,65 +28,124 @@ def get_model():
     global _model
     if _model is None:
         print("🔥 Loading embedding model at runtime...")
-        _model = SentenceTransformer(
-            MODEL_NAME,
-            cache_folder=CACHE_DIR
-        )
-        # Performance optimization for CPU
+        _model = SentenceTransformer(MODEL_NAME, cache_folder=CACHE_DIR)
         if not torch.cuda.is_available():
-            torch.set_num_threads(4) 
+            torch.set_num_threads(4)
     return _model
 
 
 # -----------------------------
-# Utils
+# Helpers for your Mongo schema
 # -----------------------------
+def _as_text_list(v):
+    """Return list[str] from value that may be list/str/None."""
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if x is not None]
+    return [str(v)]
+
+
+def get_company_name(job):
+    comp = job.get("company") or {}
+    if isinstance(comp, dict):
+        return str(comp.get("name", "")).strip()
+    return ""
+
+
+def get_location_text(job):
+    locs = _as_text_list(job.get("location"))
+    return ", ".join([x.strip() for x in locs if x.strip()])
+
+
+def get_skills_text(job):
+    skills = _as_text_list(job.get("skills"))
+    return " ".join([x.lower().strip() for x in skills if x])
+
+
+def get_salary_min(job):
+    sal = job.get("salary") or {}
+    if isinstance(sal, dict):
+        return str(sal.get("min", "")).strip()
+    return ""
+
+
+def get_salary_max(job):
+    sal = job.get("salary") or {}
+    if isinstance(sal, dict):
+        return str(sal.get("max", "")).strip()
+    return ""
+
+
 def clean_job_link(raw):
     if not raw:
         return ""
 
-    raw = raw.strip()
+    raw = str(raw).strip()
 
     if "@" in raw and "http" not in raw:
         return f"mailto:{raw}"
 
-    raw = raw.replace("https: ", "https://")
-    raw = raw.replace("http: ", "http://")
-    raw = raw.replace(" ", "")
-
+    raw = raw.replace("https: ", "https://").replace("http: ", "http://").replace(" ", "")
     match = re.search(r"(https?://[^\s]+)", raw)
     return match.group(1) if match else raw
 
 
-def recency_boost(created_date, max_boost=0.08, decay_days=30):
-    try:
-        if isinstance(created_date, str):
-            created_dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-        elif isinstance(created_date, datetime):
-            created_dt = created_date
-        else:
-            return 0.0
+def parse_created_at(created_at):
+    """
+    Supports:
+    - PyMongo datetime (datetime)
+    - Extended JSON {"$date": "...Z"}
+    - ISO string "...Z"
+    """
+    if not created_at:
+        return None
 
-        now = datetime.now(timezone.utc)
-        age_days = max((now - created_dt).days, 0)
-        return max_boost * max(0, (decay_days - age_days) / decay_days)
+    if isinstance(created_at, datetime):
+        # Ensure timezone aware
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=timezone.utc)
+        return created_at
 
-    except Exception:
+    if isinstance(created_at, dict) and "$date" in created_at:
+        created_at = created_at["$date"]
+
+    if isinstance(created_at, str):
+        try:
+            return datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    return None
+
+
+def recency_boost(created_at, max_boost=0.08, decay_days=30):
+    created_dt = parse_created_at(created_at)
+    if not created_dt:
         return 0.0
 
+    now = datetime.now(timezone.utc)
+    age_days = max((now - created_dt).days, 0)
+    return max_boost * max(0.0, (decay_days - age_days) / decay_days)
 
-def final_score(similarity, row, resume_data):
-    score = similarity
 
-    job_skills = str(row.get("Skills", "")).lower()
-    overlap = sum(1 for s in resume_data["skills"] if s in job_skills)
+def final_score(similarity, job, resume_data):
+    score = float(similarity)
+
+    # skills overlap: your schema has skills: []
+    job_skills_text = get_skills_text(job)
+    overlap = sum(1 for s in resume_data.get("skills", []) if str(s).lower() in job_skills_text)
     score += 0.07 * overlap
 
-    if resume_data.get("experience_years"):
-        if str(resume_data["experience_years"]) in str(row.get("Experience Level", "")):
+    # experience check: your schema has experienceLevel
+    exp_text = str(job.get("experienceLevel", "")).lower()
+    exp_years = resume_data.get("experience_years")
+    if exp_years is not None:
+        # very simple heuristic: if "2 years" present etc.
+        if str(exp_years) in exp_text:
             score += 0.15
 
-    score += recency_boost(row.get("created_date"))
+    score += recency_boost(job.get("createdAt"))
     return score
 
 
@@ -107,19 +157,14 @@ def recommend_jobs(resume_text: str):
     df = get_jobs_df()
 
     if index is None or df is None or df.empty:
-        return {
-            "error": "Recommendation system is warming up. Please try again shortly."
-        }
+        return {"error": "Recommendation system is warming up. Please try again shortly."}
 
     resume_data = parse_resume(resume_text)
     model = get_model()
 
-    emb_vec = model.encode(
-        [resume_text],
-        normalize_embeddings=True
-    )[0]
-
+    emb_vec = model.encode([resume_text], normalize_embeddings=True)[0]
     emb = np.asarray([emb_vec], dtype="float32")
+
     scores, indices = index.search(emb, TOP_K)
 
     ranked = []
@@ -127,38 +172,34 @@ def recommend_jobs(resume_text: str):
         if idx >= len(df):
             continue
 
-        row = df.iloc[idx]
+        job = df.iloc[idx]  # Pandas Series
         sim = float(scores[0][rank])
-        score = final_score(sim, row, resume_data)
+        score = final_score(sim, job, resume_data)
 
-        created_date = row.get("created_date")
-        try:
-            if isinstance(created_date, str):
-                created_dt = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
-            else:
-                created_dt = created_date
-        except Exception:
-            created_dt = datetime.min
-
+        created_dt = parse_created_at(job.get("createdAt")) or datetime.min.replace(tzinfo=timezone.utc)
         ranked.append((score, created_dt, idx))
 
     ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
     results = []
-    for score, _, idx in ranked[:TOP_K]:
+    for score, created_dt, idx in ranked[:TOP_K]:
         job = df.iloc[idx]
 
         results.append({
-            "job_title": str(job.get("Job Title", "")),
-            "company": str(job.get("Company Name", "")),
-            "location": str(job.get("Location", "")),
-            "experience": str(job.get("Experience Level", "")),
-            "skills": str(job.get("Skills", "")),
-            "salary_min": str(job.get("Salary Min (?)")),
-            "salary_max": str(job.get("Salary Max (?)")),
+            "job_title": str(job.get("title", "")),
+            "company": get_company_name(job),
+            "location": get_location_text(job),
+            "job_type": str(job.get("jobType", "")),
+            "work_type": str(job.get("workType", "")),
+            "experience": str(job.get("experienceLevel", "")),
+            "skills": _as_text_list(job.get("skills")),
+            "salary_min": get_salary_min(job),
+            "salary_max": get_salary_max(job),
             "match_percentage": round(min(score * 100, 100), 2),
-            "created_date": str(job.get("created_date", "")),
-            "job_link": clean_job_link(job.get("Direct Link", "")),
+            "created_date": created_dt.isoformat() if created_dt and created_dt != datetime.min.replace(tzinfo=timezone.utc) else "",
+            "job_link": clean_job_link(job.get("directLink", "")),
+            "category": str(job.get("category", "")),
+            "verification_status": str(job.get("verificationStatus", "")),
         })
 
     return results

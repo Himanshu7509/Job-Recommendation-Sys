@@ -35,17 +35,17 @@ LOCAL_INDEX = f"{DATA_DIR}/jobs.index"
 
 # ----------------------------------------
 
+def build_job_text(row):
+    return " | ".join(filter(None, [
+        f"Title: {row.get('title', '')}",
+        f"Category: {row.get('category', '')}",
+        f"Experience: {row.get('experienceLevel', '')}",
+        f"Skills: {', '.join(row.get('skills') or [])}",
+        f"Requirements: {', '.join(row.get('requirements') or [])}",
+        f"Responsibilities: {', '.join(row.get('responsibilities') or [])}",
+        f"Description: {row.get('description', '')}",
+    ]))
 
-def build_job_text(job):
-    return f"""
-Job Title: {job.get('Job Title', '')}
-Category: {job.get('Category', '')}
-Experience Level: {job.get('Experience Level', '')}
-Skills: {job.get('Skills', '')}
-Requirements: {job.get('Requirements', '')}
-Responsibilities: {job.get('Responsibilities', '')}
-Job Description: {job.get('Job Description', '')}
-"""
 
 
 # ---------- S3 helpers ----------

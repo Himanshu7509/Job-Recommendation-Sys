@@ -9,7 +9,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
 
-DB_NAME = "job_recommendation"
+DB_NAME = "jobsDB"
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]

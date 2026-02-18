@@ -28,7 +28,7 @@ from app.core.config import DATA_DIR
 
 # ---------------- Config ----------------
 MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = "job_recommendation"
+DB_NAME = "jobsDB"
 COLLECTION_NAME = "jobs"
 
 OUTPUT_INDEX_PATH = f"{DATA_DIR}/jobs.index"
@@ -41,15 +41,16 @@ S3_KEY = "job-recomandation-system/faiss/jobs.index"
 
 
 def build_job_text(row):
-    return f"""
-Job Title: {row.get('Job Title', '')}
-Category: {row.get('Category', '')}
-Experience Level: {row.get('Experience Level', '')}
-Skills: {row.get('Skills', '')}
-Requirements: {row.get('Requirements', '')}
-Responsibilities: {row.get('Responsibilities', '')}
-Job Description: {row.get('Job Description', '')}
-"""
+    return " | ".join(filter(None, [
+        f"Title: {row.get('title', '')}",
+        f"Category: {row.get('category', '')}",
+        f"Experience: {row.get('experienceLevel', '')}",
+        f"Skills: {', '.join(row.get('skills') or [])}",
+        f"Requirements: {', '.join(row.get('requirements') or [])}",
+        f"Responsibilities: {', '.join(row.get('responsibilities') or [])}",
+        f"Description: {row.get('description', '')}",
+    ]))
+
 
 
 def upload_to_s3(local_path: str):

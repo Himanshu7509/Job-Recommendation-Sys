@@ -23,7 +23,7 @@ LOCAL_INDEX = f"{DATA_DIR}/jobs.index"
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     print("⚠️ WARNING: MONGO_URI not found. Check your environment variables or .env file.")
-DB_NAME = "job_recommendation"
+DB_NAME = "jobsDB"
 COLLECTION = "jobs"
 # ----------------------------------------
 
