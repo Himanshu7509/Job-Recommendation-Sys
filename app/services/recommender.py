@@ -155,7 +155,7 @@ def final_score(similarity, job, resume_data):
 def recommend_jobs(resume_text: str):
     index = get_index()
     df = get_jobs_df()
-
+    
     if index is None or df is None or df.empty:
         return {"error": "Recommendation system is warming up. Please try again shortly."}
 
